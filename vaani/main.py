@@ -112,6 +112,50 @@ def lang_is_en(stt: dict) -> bool:
     return (stt.get("lang") or "en-IN").startswith("en")
 
 
+def resolve_wake(stt: dict, source: str, on_listen=None, timings: dict | None = None):
+    """For wake-sourced clips: verify the wake phrase and strip it. Returns the command stt
+    dict, or None if no wake word was heard. Records a follow-up clip if only the wake word was said."""
+    if source != "wake":
+        return stt
+    from . import sarvam_client, wakeword
+    raw0 = (stt.get("raw_transcript") or "").strip()
+    en0 = (stt.get("text_en") or "").strip()
+    matched, rest = wakeword.contains_wake(raw0)
+    rest_en = ""
+    m_en, r_en = wakeword.contains_wake(en0)
+    if m_en:
+        rest_en = (r_en or "").strip()
+    if not (matched or m_en):
+        if timings is None:
+            console.print(f"[dim]  ignored: {_short(raw0 or en0, 100)}[/]")
+        return None
+    if not (rest or "").strip() and not rest_en:
+        # Wake word only: prompt and record the actual command.
+        from . import audio_io
+        audio_io.beep("listen")
+        if on_listen:
+            on_listen("wake")
+        wav = audio_io.record_until_silence()
+        if timings is not None and "on_stt" in timings:
+            timings["on_stt"]()
+        t = _timer()
+        stt = sarvam_client.stt_translate(wav)
+        if timings is None:
+            _dim("stt", t())
+        else:
+            timings["stt"] = timings.get("stt", 0.0) + t()
+        return stt
+    # Wake word + command in one phrase: keep the English remainder.
+    if not rest_en and lang_is_en(stt):
+        rest_en = (rest or "").strip()
+    if not rest_en:
+        rest_en = en0
+    stt = dict(stt)
+    stt["text_en"] = rest_en
+    stt["raw_transcript"] = (rest or "").strip() or raw0
+    return stt
+
+
 def _setup_tools() -> None:
     try:
         from . import tools
@@ -121,8 +165,17 @@ def _setup_tools() -> None:
 
 
 def _ensure_key() -> bool:
+    """If no key is saved, ask for it now (hidden input), save to ~/.vaani/.env, ping-check, continue."""
+    if onboarding.current_key():
+        return True
+    console.print("[yellow]No Sarvam API key found.[/] Get one at https://dashboard.sarvam.ai")
+    try:
+        onboarding._step_key()
+    except (EOFError, KeyboardInterrupt):
+        pass
+    onboarding.apply_settings()
     if not onboarding.current_key():
-        console.print("[red]No Sarvam API key. Run `vaani setup` first.[/]")
+        console.print("[red]No Sarvam API key entered.[/]")
         return False
     return True
 
@@ -151,13 +204,20 @@ def run_text(text: str, lang: str | None, voice: bool) -> int:
         return 1
 
 
-def run_loop(voice: bool) -> int:
+def run_loop(voice: bool, use_ui: bool = True) -> int:
     if onboarding.needs_setup():
         onboarding.run_setup()
     onboarding.apply_settings()
     if not _ensure_key():
         return 1
     _setup_tools()
+    if use_ui:
+        try:
+            from . import ui
+            if ui.available():
+                return ui.run_ui(voice)
+        except ImportError:
+            pass
     from . import trigger
     try:
         from .audio_io import ClipTooShort
@@ -192,36 +252,9 @@ def run_loop(voice: bool) -> int:
                 t = _timer()
                 stt = sarvam_client.stt_translate(wav)
                 _dim("stt", t())
-                if source == "wake":
-                    from . import wakeword
-                    raw0 = (stt.get("raw_transcript") or "").strip()
-                    en0 = (stt.get("text_en") or "").strip()
-                    matched, rest = wakeword.contains_wake(raw0)
-                    rest_en = ""
-                    m_en, r_en = wakeword.contains_wake(en0)
-                    if m_en:
-                        rest_en = (r_en or "").strip()
-                    if not (matched or m_en):
-                        console.print(f"[dim]  ignored: {_short(raw0 or en0, 100)}[/]")
-                        continue
-                    if not (rest or "").strip() and not rest_en:
-                        # Wake word only: prompt and record the actual command.
-                        from . import audio_io
-                        audio_io.beep("listen")
-                        on_listen()
-                        wav = audio_io.record_until_silence()
-                        t = _timer()
-                        stt = sarvam_client.stt_translate(wav)
-                        _dim("stt", t())
-                    else:
-                        # Wake word + command in one phrase: keep the English remainder.
-                        if not rest_en and lang_is_en(stt):
-                            rest_en = (rest or "").strip()
-                        if not rest_en:
-                            rest_en = en0
-                        stt = dict(stt)
-                        stt["text_en"] = rest_en
-                        stt["raw_transcript"] = (rest or "").strip() or raw0
+                stt = resolve_wake(stt, source, on_listen)
+                if stt is None:
+                    continue
                 command_en = (stt.get("text_en") or "").strip()
                 lang = stt.get("lang") or config.DEFAULT_LANG
                 if lang not in config.SUPPORTED_LANGS:
@@ -286,8 +319,47 @@ def run_doctor() -> int:
     return 0
 
 
+def open_new_window(args: list[str]) -> int:
+    """Relaunch Vaani in a fresh terminal window."""
+    import os
+    import shlex
+    import shutil
+    import subprocess
+    py = sys.executable or "python"
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cmd = [py, "-m", "vaani", *args]
+    try:
+        if sys.platform == "win32":
+            line = subprocess.list2cmdline(cmd)
+            subprocess.Popen(f'start "Vaani" cmd /k {line}', shell=True, cwd=here)
+        elif sys.platform == "darwin":
+            line = "cd " + shlex.quote(here) + " && " + shlex.join(cmd)
+            esc = line.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{esc}"',
+                              "-e", 'tell application "Terminal" to activate'])
+        else:
+            line = shlex.join(cmd) + "; exec $SHELL"
+            for term, pre in (("x-terminal-emulator", ["-e"]), ("gnome-terminal", ["--"]),
+                              ("konsole", ["-e"]), ("xterm", ["-e"])):
+                if shutil.which(term):
+                    subprocess.Popen([term, *pre, "bash", "-c", line], cwd=here)
+                    break
+            else:
+                console.print("[red]No terminal emulator found.[/]")
+                return 1
+        return 0
+    except Exception as e:
+        console.print(f"[red]Could not open a new window: {e}[/]")
+        return 1
+
+
 # ---------- CLI ----------
 def cli(argv=None) -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # Indic text on Windows consoles
+        except Exception:
+            pass
     p = argparse.ArgumentParser(prog="vaani", description="Vaani - voice assistant for your laptop, powered by Sarvam AI.")
     p.add_argument("command", nargs="?", choices=["run", "setup", "doctor"], default="run",
                    help="run (default) | setup | doctor")
@@ -295,9 +367,13 @@ def cli(argv=None) -> None:
     p.add_argument("--lang", "-l", choices=config.SUPPORTED_LANGS,
                    help="language of --text and the reply (default en-IN)")
     p.add_argument("--no-voice", action="store_true", help="print the reply, don't speak it")
+    p.add_argument("--new-window", action="store_true", help="open Vaani in a new terminal window")
+    p.add_argument("--simple", action="store_true", help="plain loop without the interactive terminal UI")
     p.add_argument("--version", action="version", version=f"vaani {__version__}")
     a = p.parse_args(argv)
     voice = not a.no_voice
+    if a.new_window:
+        sys.exit(open_new_window([x for x in (argv if argv is not None else sys.argv[1:]) if x != "--new-window"]))
     try:
         if a.command == "setup":
             onboarding.run_setup()
@@ -307,7 +383,7 @@ def cli(argv=None) -> None:
         elif a.text:
             code = run_text(a.text, a.lang, voice)
         else:
-            code = run_loop(voice)
+            code = run_loop(voice, use_ui=not a.simple)
     except KeyboardInterrupt:
         console.print("\n[cyan]Bye![/]")
         code = 130

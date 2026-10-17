@@ -43,7 +43,10 @@ _THINK_RE = re.compile(r"<think>.*?(</think>|$)", re.S | re.I)
 
 
 def _strip_think(text) -> str:
-    return _THINK_RE.sub("", text or "").strip()
+    text = _THINK_RE.sub("", text or "")
+    # replies are spoken; drop markdown emphasis/code/headers so TTS doesn't read symbols
+    text = re.sub(r"[*_`#]+", "", text)
+    return text.strip()
 
 
 def _emit(on_event, kind, data):

@@ -8,6 +8,7 @@ pynput
 pyautogui
 pyperclip
 pillow
+prompt_toolkit
 # Windows only (volume control):
 pycaw; sys_platform == "win32"
 comtypes; sys_platform == "win32"

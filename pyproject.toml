@@ -19,6 +19,7 @@ dependencies = [
     "pyautogui",
     "pyperclip",
     "pillow",
+    "prompt_toolkit",
 ]
 
 [project.optional-dependencies]

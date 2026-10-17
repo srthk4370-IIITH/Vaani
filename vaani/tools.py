@@ -630,6 +630,78 @@ def speak(text: str = "", lang: str = None) -> dict:
     except Exception as e:
         return _fail(f"Speech failed: {e}")
 
+def transliterate_text(text: str = "", src: str = "auto", tgt: str = "hi-IN") -> dict:
+    if not text:
+        return _fail("No text given")
+    try:
+        from .sarvam_client import transliterate
+        return _ok(transliterate(text, src or "auto", tgt or "hi-IN"))
+    except Exception as e:
+        return _fail(f"Transliteration failed: {e}")
+
+
+def detect_language(text: str = "") -> dict:
+    if not text:
+        return _fail("No text given")
+    try:
+        from .sarvam_client import detect_language as _lid
+        r = _lid(text)
+        return _ok(f"language={r['language_code']}, script={r['script_code']}")
+    except Exception as e:
+        return _fail(f"Language detection failed: {e}")
+
+
+_IMG_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+def read_image_text(path: str = "", question: str = "") -> dict:
+    import os
+    p = os.path.expandvars(os.path.expanduser((path or "").strip().strip('"')))
+    if not p or not os.path.isfile(p):
+        return _fail(f"Image file not found: {path}")
+    if os.path.splitext(p)[1].lower() not in _IMG_EXT:
+        return _fail("Only image files (png, jpg, jpeg, webp, bmp) are supported")
+    try:
+        from .sarvam_client import vision_read
+        prompt = question or ("Extract all readable text from this image verbatim. "
+                              "If there is little or no text, briefly describe the image.")
+        return _ok(vision_read(p, prompt))
+    except Exception as e:
+        return _fail(f"Could not read image: {e}")
+
+
+_DOC_EXT = {".pdf", ".png", ".jpg", ".jpeg"}
+
+
+def read_document(path: str = "", question: str = "", lang: str = "en-IN") -> dict:
+    import os
+    p = os.path.expandvars(os.path.expanduser((path or "").strip().strip('"')))
+    if not p or not os.path.isfile(p):
+        return _fail(f"Document not found: {path}")
+    if os.path.splitext(p)[1].lower() not in _DOC_EXT:
+        return _fail("Only PDF, PNG, JPG documents are supported")
+    try:
+        from .sarvam_client import digitise_document, answer_from_text
+        text = digitise_document(p, lang=lang or "en-IN")
+        if not text:
+            return _fail("No text could be extracted from the document")
+        if question:
+            return _ok(answer_from_text(text, question))
+        return _ok(text)
+    except Exception as e:
+        return _fail(f"Could not read document: {e}")
+
+
+def ask_sarvam(question: str = "") -> dict:
+    if not question:
+        return _fail("No question given")
+    try:
+        from .sarvam_client import ask
+        return _ok(ask(question))
+    except Exception as e:
+        return _fail(f"Knowledge lookup failed: {e}")
+
+
 # --------------------------------------------------------------------------- misc
 
 def get_time() -> dict:
@@ -676,6 +748,15 @@ TOOL_SCHEMAS = [
     _fn("translate_text", "Translate text between Indian languages / English. Language codes like hi-IN, ta-IN, en-IN.",
         {"text": _S, "src": {**_S, "description": "Source code or 'auto'"}, "tgt": _S}, ["text", "tgt"]),
     _fn("speak", "Speak text aloud in a given language (e.g. hi-IN).", {"text": _S, "lang": _S}, ["text"]),
+    _fn("transliterate_text", "Transliterate (change script, keep pronunciation) e.g. Hinglish 'namaste' -> Devanagari. Codes like hi-IN, en-IN.",
+        {"text": _S, "src": {**_S, "description": "Source code or 'auto'"}, "tgt": _S}, ["text", "tgt"]),
+    _fn("detect_language", "Detect the language and script of a piece of text.", {"text": _S}, ["text"]),
+    _fn("read_image_text", "OCR / describe a local image file (png/jpg) by path; optional question about it.",
+        {"path": _S, "question": _S}, ["path"]),
+    _fn("read_document", "Read a local PDF/PNG/JPG document with Sarvam Vision (OCR/digitise, Indian languages). Returns its text, or answers 'question' about it.",
+        {"path": _S, "question": _S, "lang": {**_S, "description": "Document language code, default en-IN (e.g. hi-IN)"}}, ["path"]),
+    _fn("ask_sarvam", "Ask a general knowledge/explanation question (facts, definitions, how things work). Returns a short answer.",
+        {"question": _S}, ["question"]),
     _fn("read_clipboard", "Read the current clipboard text."),
     _fn("get_time", "Get the current local date and time."),
     _fn("wait", "Wait a few seconds (max 5) e.g. for a page to load.",
@@ -689,6 +770,9 @@ _REGISTRY = {
     "set_volume": set_volume, "screenshot": screenshot, "read_screen": read_screen,
     "translate_text": translate_text, "speak": speak, "read_clipboard": read_clipboard,
     "get_time": get_time, "wait": wait, "close_window": close_window,
+    "transliterate_text": transliterate_text, "detect_language": detect_language,
+    "read_image_text": read_image_text, "ask_sarvam": ask_sarvam,
+    "read_document": read_document,
 }
 
 

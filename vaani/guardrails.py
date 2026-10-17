@@ -14,7 +14,8 @@ import threading
 from . import config
 
 READ_ONLY = {"screenshot", "read_screen", "read_clipboard", "get_time", "translate_text",
-             "speak", "scroll", "wait", "search_web", "open_url"}
+             "speak", "scroll", "wait", "search_web", "open_url",
+             "transliterate_text", "detect_language", "read_image_text", "ask_sarvam", "read_document"}
 # Local, harmless actions that need no cloud review.
 SAFE_LOCAL = {"set_volume"}
 

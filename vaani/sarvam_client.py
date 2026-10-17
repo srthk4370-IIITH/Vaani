@@ -284,6 +284,98 @@ def vision_read(image_path, prompt) -> str:
         raise SarvamError(f"Unexpected vision response: {str(res)[:300]}")
 
 
+# ---------------------------------------------------------------- transliterate / LID / knowledge
+def transliterate(text, src, tgt) -> str:
+    if not text or not text.strip():
+        return text or ""
+    res = _post(config.TRANSLITERATE_URL, json={
+        "input": text[:1000], "source_language_code": src or "auto",
+        "target_language_code": tgt}, timeout=config.TIMEOUT)
+    return res.get("transliterated_text", "")
+
+
+def detect_language(text) -> dict:
+    res = _post(config.TEXT_LID_URL, json={"input": (text or "")[:1000]}, timeout=config.TIMEOUT)
+    return {"language_code": res.get("language_code"), "script_code": res.get("script_code")}
+
+
+def ask(question) -> str:
+    body = {"model": config.KNOWLEDGE_MODEL, "reasoning_effort": None, "messages": [
+        {"role": "system", "content": "Answer factual/explanatory questions accurately in at most 3 short sentences. No markdown."},
+        {"role": "user", "content": question}]}
+    res = _post(config.CHAT_URL, json=body, timeout=max(config.TIMEOUT, 30))
+    try:
+        return (res["choices"][0]["message"].get("content") or "").strip()
+    except (KeyError, IndexError, TypeError):
+        raise SarvamError(f"Unexpected chat response: {str(res)[:300]}")
+
+
+# ---------------------------------------------------------------- doc-ai (Sarvam Vision digitise)
+DOC_AI_BASE = getattr(config, "DOC_AI_BASE", "https://api.sarvam.ai/doc-ai/v1")
+_DOC_MIME = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+_DOC_TERMINAL = {"completed", "partially_completed", "failed", "cancelled", "canceled", "error"}
+
+
+def _doc_headers():
+    # doc-ai rejects the extra Bearer header; subscription key only
+    return {"api-subscription-key": _key()}
+
+
+def digitise_document(path, lang="en-IN", output_format="md", max_wait=90, max_chars=6000) -> str:
+    """Sarvam Vision doc-ai digitise: upload -> poll status -> join page block text."""
+    ext = os.path.splitext(path)[1].lower()
+    mime = _DOC_MIME.get(ext, "application/octet-stream")
+    with open(path, "rb") as fh:
+        r = requests.post(f"{DOC_AI_BASE}/job/digitise", headers=_doc_headers(),
+                          data={"language": _norm_lang(lang) or "en-IN", "output_format": output_format,
+                                "content_type": "printed", "auto_orient": "true"},
+                          files={"file": (os.path.basename(path), fh, mime)},
+                          timeout=max(config.TIMEOUT, 60))
+    if r.status_code >= 400:
+        raise SarvamError(f"doc-ai digitise HTTP {r.status_code}: {r.text[:300]}", r.status_code)
+    res = r.json()
+    job = res.get("job_id")
+    if not job:
+        raise SarvamError(f"doc-ai: no job_id: {str(res)[:300]}")
+    deadline = time.time() + max_wait
+    status = res.get("status", "pending")
+    while status not in _DOC_TERMINAL:
+        if time.time() > deadline:
+            raise SarvamError(f"doc-ai job {job} still '{status}' after {max_wait}s")
+        time.sleep(2)
+        r = requests.get(f"{DOC_AI_BASE}/job/{job}/status", headers=_doc_headers(), timeout=30)
+        if r.status_code >= 400:
+            raise SarvamError(f"doc-ai status HTTP {r.status_code}: {r.text[:300]}", r.status_code)
+        status = (r.json().get("status") or "").lower()
+    if status not in ("completed", "partially_completed"):
+        raise SarvamError(f"doc-ai job {job} ended with status '{status}'")
+    r = requests.get(f"{DOC_AI_BASE}/job/{job}/results", headers=_doc_headers(), timeout=60)
+    if r.status_code >= 400:
+        raise SarvamError(f"doc-ai results HTTP {r.status_code}: {r.text[:300]}", r.status_code)
+    parts = []
+    for doc in r.json().get("documents") or []:
+        for page in doc.get("pages") or []:
+            blocks = sorted(page.get("blocks") or [], key=lambda b: b.get("reading_order") or 0)
+            txt = "\n".join((b.get("text") or "").strip() for b in blocks if (b.get("text") or "").strip())
+            if txt:
+                parts.append(f"[page {page.get('page_num')}]\n{txt}")
+    out = "\n\n".join(parts).strip()
+    if len(out) > max_chars:
+        out = out[:max_chars] + f"\n...[truncated, {len(out)} chars total]"
+    return out
+
+
+def answer_from_text(text, question) -> str:
+    body = {"model": config.KNOWLEDGE_MODEL, "reasoning_effort": None, "messages": [
+        {"role": "system", "content": "Answer the question using only the document text provided. Be brief (max 3 sentences). No markdown. If the answer is not in the document, say so."},
+        {"role": "user", "content": f"DOCUMENT:\n{text}\n\nQUESTION: {question}"}]}
+    res = _post(config.CHAT_URL, json=body, timeout=max(config.TIMEOUT, 45))
+    try:
+        return (res["choices"][0]["message"].get("content") or "").strip()
+    except (KeyError, IndexError, TypeError):
+        raise SarvamError(f"Unexpected chat response: {str(res)[:300]}")
+
+
 # ---------------------------------------------------------------- ping
 def ping():
     try:

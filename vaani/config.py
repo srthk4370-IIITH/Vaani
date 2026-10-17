@@ -12,12 +12,22 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR = HOME_DIR / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(ENV_PATH)
-    load_dotenv()  # also allow ./.env
-except ImportError:
-    pass
+def _load_env(path):
+    """Minimal .env reader tolerant of UTF-16 (PowerShell `echo >`) and BOMs."""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return
+    text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig", "ignore")
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_env(ENV_PATH)
+_load_env(Path.cwd() / ".env")
 
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
 
@@ -28,6 +38,8 @@ STT_TRANSLATE_URL = f"{SARVAM_BASE}/speech-to-text-translate"
 TRANSLATE_URL = f"{SARVAM_BASE}/translate"
 TTS_URL = f"{SARVAM_BASE}/text-to-speech"
 CHAT_URL = f"{SARVAM_BASE}/v1/chat/completions"
+TRANSLITERATE_URL = f"{SARVAM_BASE}/transliterate"
+TEXT_LID_URL = f"{SARVAM_BASE}/text-lid"
 # gemma4 (image input) is served ONLY on V2 chat completions (beta; key needs access). V1 = sarvam-105b only.
 CHAT_V2_URL = f"{SARVAM_BASE}/v2/chat/completions"
 
@@ -59,6 +71,7 @@ TTS_SPEAKER_V3 = "shubh"  # bulbul:v3 speakers are multilingual
 AGENT_MODEL = os.environ.get("VAANI_AGENT_MODEL", "sarvam-105b")
 FALLBACK_AGENT_MODEL = os.environ.get("VAANI_FALLBACK_MODEL", "sarvam-105b")  # sarvam-m deprecated
 VISION_MODEL = os.environ.get("VAANI_VISION_MODEL", "gemma4")
+KNOWLEDGE_MODEL = os.environ.get("VAANI_KNOWLEDGE_MODEL", "sarvam-105b")
 # None -> reasoning off (sent as JSON null; v1 docs: "Can be disabled by explicitly setting to None").
 # v1 enum: "low"/"high"/"max" (guide also documents "medium", the default).
 REASONING_EFFORT = os.environ.get("VAANI_REASONING_EFFORT") or None

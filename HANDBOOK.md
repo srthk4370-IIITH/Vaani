@@ -28,7 +28,8 @@ Source spec: `Vaani_PRD.pdf`. Sarvam model/endpoint reference: `model info/` scr
   -> Sarvam 105B agent (tool-calling loop, max 6 steps)
        laptop tools: open_app, open_url, search_web, type_text, press_key, hotkey, scroll,
                      set_volume, screenshot, read_clipboard, get_time, wait, close_window
-       Sarvam tools: read_screen (vision), translate_text, speak
+       Sarvam tools: read_screen (vision), translate_text, speak, transliterate_text,
+                     detect_language (text-lid), read_image_text (gemma4 OCR), read_document (doc-ai digitise PDF/PNG/JPG + 105b Q&A), ask_sarvam (105b knowledge)
   -> final English reply -> translate to user's language -> Bulbul TTS -> play (local)
   errors -> friendly sentence -> translated -> spoken; Sarvam down -> local beep
 ```
@@ -74,6 +75,7 @@ Auth header: `api-subscription-key: <key>`.
 | Vosk wake model download | - | ❌ removed per user: no local AI models |
 | Cloud-checked wake word (VAD + STT + fuzzy match) | agent A + main | ✅ done |
 | guardrails.py (local rules + Sarvam AI risk review + audit log) | guard agent | ✅ done, offline-tested |
+| Terminal UI (ui.py: Codex-style transcript, prompt_toolkit toolbar w/ live state + mic meter, typed+voice queue, slash cmds, in-prompt SAFE_MODE confirm, rich fallback, `--new-window`, `--simple`) | UI agent | ✅ done (render-tested; interactive untested) |
 
 ## Guardrails (`vaani/guardrails.py`)
 All AI stays on Sarvam cloud; execution + storage are local. Every `tools.execute_tool(name, args, user_command)` call goes through `guardrails.check()` first:
