@@ -156,7 +156,7 @@ def mfcc(x: np.ndarray, cmn: bool = True) -> np.ndarray:
 
 
 def _energy_thr(e: np.ndarray) -> float:
-    return float(max(e.max() * 0.08, np.percentile(e, 10) * 2.5))
+    return float(max(e.max() * 0.15, np.percentile(e, 10) * 2.5))
 
 
 def _trim(x: np.ndarray, lead_only: bool = False) -> tuple[np.ndarray, int]:
@@ -265,7 +265,7 @@ def is_enrolled() -> bool:
 
 
 def enroll(n: int = 3, on_prompt=None) -> dict:
-    """Record n samples of the wake phrase (each 0.4-2.5 s), save templates + threshold.
+    """Record n samples of the wake phrase (each 0.3-3.0 s), save templates + threshold.
     on_prompt(msg) is called before each recording / on retry (default: print)."""
     say = on_prompt or print
     clips: list[np.ndarray] = []
@@ -275,13 +275,21 @@ def enroll(n: int = 3, on_prompt=None) -> dict:
         say(f"Say 'Hey Vaani' ({len(clips) + 1}/{n})...")
         try:
             wav = audio_io.record_until_silence(max_sec=4.0, silence_sec=0.6, no_speech_timeout=6.0)
-        except audio_io.ClipTooShort:
-            say("  didn't hear it, try again")
+        except audio_io.ClipTooShort as e:
+            say(f"  didn't hear it ({e}) - speak a bit louder / closer, try again")
             continue
-        x, _ = _trim(load_wav(wav))
+        raw = load_wav(wav)
+        x, _ = _trim(raw)
         dur = len(x) / SR
-        if not 0.4 <= dur <= 2.5:
-            say(f"  that was {dur:.1f}s - say just 'Hey Vaani', try again")
+        peak = float(np.abs(raw).max()) if raw.size else 0.0
+        if peak < 0.02:
+            say(f"  too quiet (peak {peak:.3f}) - check the mic, try again")
+            continue
+        if dur < 0.3:
+            say(f"  too short ({dur:.2f}s, peak {peak:.2f}) - say 'Hey Vaani', try again")
+            continue
+        if dur > 3.0:
+            say(f"  too long ({dur:.1f}s, peak {peak:.2f}) - say just 'Hey Vaani', try again")
             continue
         clips.append(x)
     if len(clips) < n:

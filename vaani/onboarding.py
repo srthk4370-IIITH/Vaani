@@ -140,6 +140,10 @@ def _step_key() -> None:
 def _use_mic(index) -> None:
     """Make the chosen input device the default for every recording."""
     try:
+        config.MIC_DEVICE = int(index)
+    except (TypeError, ValueError):
+        config.MIC_DEVICE = None
+    try:
         import sounddevice as sd
         sd.default.device = (index, sd.default.device[1])
     except Exception:

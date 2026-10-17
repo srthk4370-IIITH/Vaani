@@ -49,9 +49,23 @@ def _sf():
         raise AudioUnavailable(f"soundfile/libsndfile unavailable ({e}). pip install soundfile") from e
 
 
+def _mic(sd):
+    """Chosen mic index (config.MIC_DEVICE) if it still exists as an input, else None (= default)."""
+    dev = config.MIC_DEVICE
+    if dev is None:
+        return None
+    try:
+        if sd.query_devices(dev).get("max_input_channels", 0) > 0:
+            return dev
+    except Exception:
+        pass
+    return None
+
+
 def _check_input_device(sd) -> None:
     try:
-        sd.query_devices(kind="input")
+        if _mic(sd) is None:
+            sd.query_devices(kind="input")
     except Exception as e:
         hint = " (WSL has no microphone by default)" if config.IS_WSL else ""
         raise AudioUnavailable(f"No microphone found{hint}: {e}") from e
@@ -62,7 +76,7 @@ def open_input_stream(callback, blocksize: int = BLOCK):
     sd = _sd()
     _check_input_device(sd)
     try:
-        return sd.InputStream(samplerate=SR, channels=1, dtype="int16",
+        return sd.InputStream(samplerate=SR, channels=1, dtype="int16", device=_mic(sd),
                               blocksize=blocksize, callback=callback)
     except Exception as e:
         raise AudioUnavailable(f"Could not open microphone: {e}") from e
@@ -183,12 +197,14 @@ def vad_capture(max_sec: float = config.MAX_CLIP_SEC,
     stream = open_input_stream(lambda indata, frames, t, status: q.put(indata.copy()))
     block_sec = BLOCK / SR
     calib_blocks = max(1, int(0.3 / block_sec))
+    skip_blocks = max(1, int(0.3 / block_sec))  # drop stream start-up + tail of the 'listen' beep
     preroll_blocks = max(1, int(preroll_sec / block_sec))
     noise: list[float] = []
     floor = None
     pre: list[np.ndarray] = []
     chunks: list[np.ndarray] = []
     speaking = False
+    peak = 0.0
     loud_run = 0
     speech_sec = 0.0
     silent_run = 0.0
@@ -202,12 +218,19 @@ def vad_capture(max_sec: float = config.MAX_CLIP_SEC,
             except queue.Empty:
                 continue
             level = _rms(blk)
+            if skip_blocks > 0:
+                skip_blocks -= 1
+                continue
             if floor is None:
                 noise.append(level)
                 if len(noise) >= calib_blocks:
-                    floor = float(np.median(noise))
+                    # cap: if the user already talks during calibration, don't make speech "noise"
+                    floor = min(float(np.median(noise)), 800.0)
                 continue
-            loud = level > _threshold(floor)
+            thr = _threshold(floor)
+            if speaking:  # end-of-speech relative to how loud this utterance was (robust to AGC / noisy mics)
+                thr = max(thr, peak * 0.15)
+            loud = level > thr
             if not speaking:
                 pre.append(blk)
                 if len(pre) > preroll_blocks + 2:
@@ -216,17 +239,19 @@ def vad_capture(max_sec: float = config.MAX_CLIP_SEC,
                     loud_run += 1
                     if loud_run >= 2:  # ~200 ms of energy -> speech onset
                         speaking = True
+                        peak = max([_rms(b) for b in pre[-loud_run:]] + [level])
                         chunks = list(pre)
                         speech_sec = loud_run * block_sec
                         silent_run = 0.0
                 else:
                     loud_run = 0
-                    floor = 0.95 * floor + 0.05 * level  # adapt to ambient changes
+                    floor = min(0.95 * floor + 0.05 * level, 800.0)  # adapt to ambient changes
                     idle += block_sec
                     if no_speech_timeout is not None and idle >= no_speech_timeout:
                         return None
                 continue
             chunks.append(blk)
+            peak = max(peak, level)
             if loud:
                 speech_sec += block_sec
                 silent_run = 0.0
@@ -237,7 +262,7 @@ def vad_capture(max_sec: float = config.MAX_CLIP_SEC,
                 if speech_sec < min_speech_sec:  # a click/bump, keep listening
                     if no_speech_timeout is not None:
                         return None
-                    speaking, loud_run, chunks, pre = False, 0, [], []
+                    speaking, loud_run, chunks, pre, peak = False, 0, [], [], 0.0
                     continue
                 return chunks
 
@@ -312,7 +337,7 @@ def mic_check(seconds: float = 1.5) -> float:
     sd = _sd()
     _check_input_device(sd)
     try:
-        rec = sd.rec(int(seconds * SR), samplerate=SR, channels=1, dtype="int16")
+        rec = sd.rec(int(seconds * SR), samplerate=SR, channels=1, dtype="int16", device=_mic(sd))
         sd.wait()
     except Exception as e:
         raise AudioUnavailable(f"Mic check failed: {e}") from e

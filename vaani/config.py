@@ -85,6 +85,7 @@ PTT_KEY = os.environ.get("VAANI_PTT_KEY", "f9")
 WAKE_WORD = os.environ.get("VAANI_WAKE_WORD", "hey vaani")
 WAKE_ENABLED = os.environ.get("VAANI_WAKE", "1") == "1"
 SAMPLE_RATE = 16000
+MIC_DEVICE = None  # input device index chosen in setup (set by onboarding.apply_settings)
 MIN_CLIP_SEC = 0.4
 MAX_CLIP_SEC = 15
 SILENCE_SEC = 1.2  # stop recording after this much silence (wake-word mode)

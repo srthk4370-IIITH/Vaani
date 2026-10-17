@@ -34,10 +34,16 @@ RISKY_RE = re.compile(
 # --------------------------------------------------------------------------- confirm gate
 
 def _console_confirm(question: str) -> bool:
-    try:
-        ans = input(f"[Vaani] {question} (y/n): ")
-    except Exception:
-        return False
+    ans = ""
+    for _ in range(2):
+        try:
+            ans = input(f"[Vaani] {question} (y/n): ")
+            break
+        except OSError:  # WinError 6 after audio use: reattach console stdin and retry
+            from .onboarding import _reopen_stdin
+            _reopen_stdin()
+        except Exception:
+            return False
     return ans.strip().lower() in ("y", "yes", "haan", "ha", "han")
 
 

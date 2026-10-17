@@ -420,6 +420,10 @@ class VaaniUI:
                 line = self.con.input(f"[bold {ACCENT}]› [/]")
             except (KeyboardInterrupt, EOFError):
                 break
+            except OSError:  # WinError 6: console stdin invalidated by audio driver
+                from .onboarding import _reopen_stdin
+                _reopen_stdin()
+                continue
             if not self.handle_line(line):
                 break
         return self._quit()

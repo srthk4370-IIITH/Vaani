@@ -5,10 +5,10 @@ import time
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm
 from rich.table import Table
 
 from . import __version__, config, onboarding
+from .onboarding import Confirm  # WinError-6-safe wrapper
 
 console = Console()
 
@@ -188,7 +188,6 @@ def run_loop(voice: bool, use_ui: bool = True) -> int:
             # Wake word was chosen but never recorded -> it can't listen. Offer it now.
             console.print(f"[yellow]'Hey Vaani' is not set up yet (your voice samples were never recorded).[/] "
                           f"Until then only [bold]{config.PTT_KEY.upper()}[/] push-to-talk works.")
-            from .onboarding import Confirm
             if Confirm.ask("Record 'Hey Vaani' now? (3 short samples, ~15 s)", default=True):
                 onboarding.run_wake_setup()
                 onboarding.apply_settings()
