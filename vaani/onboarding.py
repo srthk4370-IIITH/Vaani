@@ -5,7 +5,33 @@ from getpass import getpass
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Confirm as _RichConfirm, Prompt as _RichPrompt
+
+
+def _reopen_stdin() -> None:
+    """Audio drivers on Windows can invalidate the console stdin handle (WinError 6); reattach."""
+    import sys
+    try:
+        sys.stdin = open("CONIN$" if os.name == "nt" else "/dev/tty", "r", encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+
+
+class _SafePrompt:
+    def __init__(self, cls):
+        self._cls = cls
+
+    def ask(self, *args, **kwargs):
+        for _ in range(2):
+            try:
+                return self._cls.ask(*args, **kwargs)
+            except (OSError, EOFError):
+                _reopen_stdin()
+        return kwargs.get("default")
+
+
+Prompt = _SafePrompt(_RichPrompt)
+Confirm = _SafePrompt(_RichConfirm)
 
 from . import config
 
@@ -232,7 +258,10 @@ def _step_wake(s: dict) -> None:
 
 def run_wake_setup() -> None:
     """`vaani setup --wake`: (re-)enroll the wake word only."""
-    s = load_settings()
+    s = apply_settings()  # use the saved mic for the recordings
+    if s.get("mic_device") is None:
+        _step_mic(s)  # no mic chosen yet -> pick one first, else enrollment may hear silence
+        save_settings(s)
     _step_wake(s)
     save_settings(s)
     apply_settings()
@@ -253,8 +282,10 @@ def run_setup() -> dict:
     console.print("\n[bold]Step 1 - Sarvam API key[/] [dim](stored only in " + str(config.ENV_PATH) + ")[/]")
     _step_key()
     _step_mic(s)
+    save_settings(s)  # keep progress if a later step is interrupted
     console.print("\n[bold]Step 3 - Push-to-talk key[/]")
-    s["ptt_key"] = Prompt.ask("Key to hold while speaking", default=s.get("ptt_key") or "f9").strip().lower()
+    s["ptt_key"] = (Prompt.ask("Key to hold while speaking", default=s.get("ptt_key") or "f9") or "f9").strip().lower()
+    save_settings(s)
     try:
         _step_wake(s)
     except Exception as e:
