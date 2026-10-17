@@ -285,12 +285,28 @@ def play_audio(path_or_bytes) -> None:
     """Play a WAV (path or raw bytes), blocking until finished."""
     sd, sf = _sd(), _sf()
     src = io.BytesIO(path_or_bytes) if isinstance(path_or_bytes, (bytes, bytearray)) else str(path_or_bytes)
-    data, sr = sf.read(src, dtype="float32", always_2d=False)
+    data, sr = sf.read(src, dtype="float32", always_2d=True)
     try:
-        sd.play(data, sr)
-        sd.wait()
+        _play_blocking(sd, data, sr)
     except Exception as e:
         raise AudioUnavailable(f"Playback failed: {e}") from e
+
+
+_play_lock = threading.Lock()
+
+
+def _play_blocking(sd, data: np.ndarray, sr: int) -> None:
+    """Play on a private OutputStream (not the shared sd.play stream, which any other
+    sd.play/sd.rec call silently cuts off) and pad with silence so the device buffer
+    flushes the final words before the stream closes."""
+    data = np.asarray(data, dtype=np.float32)
+    if data.ndim == 1:
+        data = data[:, None]
+    tail = np.zeros((int(sr * 0.4), data.shape[1]), dtype=np.float32)
+    data = np.concatenate([data, tail])
+    with _play_lock:
+        with sd.OutputStream(samplerate=sr, channels=data.shape[1], dtype="float32") as out:
+            out.write(data)
 
 
 _TONES = {
@@ -317,8 +333,7 @@ def beep(kind: str = "listen") -> None:
                 tone *= env
             parts.append(tone)
             parts.append(np.zeros(int(sr * 0.02)))
-        sd.play(np.concatenate(parts).astype(np.float32), sr)
-        sd.wait()
+        _play_blocking(sd, np.concatenate(parts).astype(np.float32), sr)
     except Exception:
         pass
 
