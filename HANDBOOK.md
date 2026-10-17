@@ -72,7 +72,7 @@ Auth header: `api-subscription-key: <key>`.
 | packaging (pyproject, install scripts, README, .gitignore) | agent F | ✅ done |
 | deps install (pip) | background | ✅ done (py3.14) |
 | Vosk wake model download | - | ❌ removed per user: no local AI models |
-| Cloud-checked wake word (VAD + STT + fuzzy match) | agent A + main | 🟡 in progress |
+| Cloud-checked wake word (VAD + STT + fuzzy match) | agent A + main | ✅ done |
 | guardrails.py (local rules + Sarvam AI risk review + audit log) | guard agent | ✅ done, offline-tested |
 
 ## Guardrails (`vaani/guardrails.py`)
