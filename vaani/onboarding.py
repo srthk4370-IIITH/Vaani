@@ -77,6 +77,8 @@ def apply_settings() -> dict:
     lang = s.get("default_lang")
     if lang in config.SUPPORTED_LANGS:
         config.DEFAULT_LANG = lang
+    if s.get("mic_device") is not None:
+        _use_mic(s["mic_device"])
     key = current_key()
     if key:
         os.environ["SARVAM_API_KEY"] = key
@@ -109,23 +111,71 @@ def _step_key() -> None:
         console.print(f"[yellow]Could not verify key ({e}). Saved anyway.[/]")
 
 
+def _use_mic(index) -> None:
+    """Make the chosen input device the default for every recording."""
+    try:
+        import sounddevice as sd
+        sd.default.device = (index, sd.default.device[1])
+    except Exception:
+        pass
+
+
+def _probe(index, seconds: float = 0.5) -> float:
+    """Peak input level (0-1) of one device, -1 if it can't be opened."""
+    try:
+        import numpy as np
+        import sounddevice as sd
+        x = sd.rec(int(seconds * config.SAMPLE_RATE), samplerate=config.SAMPLE_RATE, channels=1,
+                   dtype="int16", device=index)
+        sd.wait()
+        return float(np.abs(x).max()) / 32768.0
+    except Exception:
+        return -1.0
+
+
 def _step_mic(s: dict) -> None:
+    console.print("\n[bold]Step 2 - Microphone[/]")
     try:
         from . import audio_io
-        devices = audio_io.list_input_devices()
-        if not devices:
-            console.print("[yellow]No microphones found.[/]")
-        else:
-            console.print("[bold]Microphones:[/]")
+        while True:
+            devices = audio_io.list_input_devices()
+            try:  # one entry per physical mic: keep only the default host API's devices
+                import sounddevice as sd
+                api = sd.default.hostapi
+                devices = [d for d in devices if sd.query_devices(int(d.split(":", 1)[0]))["hostapi"] == api] or devices
+            except Exception:
+                pass
+            if not devices:
+                console.print("[yellow]No microphones found. You can still type commands in Vaani.[/]")
+                return
+            try:
+                import sounddevice as sd
+                default_in = sd.query_devices(kind="input")["name"]
+            except Exception:
+                default_in = "?"
+            console.print(f"System default: [cyan]{default_in}[/]")
+            console.print("Probing microphones [bold](make some noise / keep talking)[/]...")
+            best, best_pk = None, 0.0
             for d in devices:
-                console.print(f"  {d}")
-        if Confirm.ask("Run a 2-second mic test now?", default=True):
-            console.print("Speak now...")
+                idx = int(d.split(":", 1)[0])
+                pk = _probe(idx)
+                console.print(f"  {d}  [dim]{'level ' + format(pk, '.3f') if pk >= 0 else 'unavailable'}[/]")
+                if pk > best_pk:
+                    best, best_pk = idx, pk
+            rec = s.get("mic_device") if s.get("mic_device") is not None else best
+            if best is not None:
+                console.print(f"Recommended: [green]{best}[/] (loudest signal)")
+            choice = Prompt.ask("Mic number to use (Enter = recommended)", default="" if rec is None else str(rec))
+            s["mic_device"] = int(choice) if choice.strip().isdigit() else None
+            _use_mic(s["mic_device"])
+            console.print("Mic test: [bold]speak now for 2 seconds...[/]")
             peak = audio_io.mic_check(2)
             if peak and peak > 0.02:
-                console.print(f"[green]Mic OK (peak {peak:.2f}).[/]")
-            else:
-                console.print(f"[yellow]Very low input (peak {peak or 0:.3f}). Check mic permissions/volume.[/]")
+                console.print(f"[green]Mic OK[/] [dim](peak {peak:.2f})[/]")
+                return
+            console.print(f"[yellow]Very low input (peak {peak or 0:.3f}).[/] Wrong mic, muted, or no mic permission.")
+            if not Confirm.ask("Pick a different mic / test again?", default=True):
+                return
     except Exception as e:
         console.print(f"[yellow]Mic check skipped: {e}[/]")
         if config.IS_WSL:
@@ -160,15 +210,24 @@ def _enroll_wake() -> bool:
 
 
 def _step_wake(s: dict) -> None:
-    console.print(
-        "[bold]Wake word 'Hey Vaani'[/]: detected [bold]locally[/] on your laptop with classic signal processing "
-        "(MFCC + DTW) against 3 samples of your voice. [dim]No internet, no API credits, no AI model; "
-        "only the command you say after it is sent to Sarvam.[/]\n"
-        f"Push-to-talk (hold {(s.get('ptt_key') or 'f9').upper()}) always works too.")
-    s["wake_enabled"] = Confirm.ask("Enable the 'Hey Vaani' wake word (record 3 samples now)?",
-                                    default=bool(s.get("wake_enabled", True)))
-    if s["wake_enabled"]:
-        s["wake_enabled"] = _enroll_wake()
+    key = (s.get("ptt_key") or "f9").upper()
+    console.print(Panel.fit(
+        "[bold]How will you talk to Vaani?[/]\n\n"
+        "  [cyan]1[/]  Say [bold]'Hey Vaani'[/] hands-free, like Siri  [dim](+ hold " + key + " also works)[/]\n"
+        "     -> needs a one-time voice recording NOW: you say 'Hey Vaani' 3 times (~15 s).\n"
+        "        Matched locally on this laptop: no internet, no credits, no AI model.\n\n"
+        "  [cyan]2[/]  Hold [bold]" + key + "[/] and speak only  [dim](no recording needed)[/]\n\n"
+        "[dim]Without the recording, 'Hey Vaani' will NOT work - only " + key + ".[/]",
+        title="Step 4 - Activation", border_style="magenta"))
+    choice = Prompt.ask("Choose", choices=["1", "2"], default="1" if s.get("wake_enabled", True) else "2")
+    if choice == "2":
+        s["wake_enabled"] = False
+        console.print(f"[green]OK - hold {key} to talk.[/] Enable the wake word later with [bold]vaani setup --wake[/].")
+        return
+    console.print("[bold]Recording your wake word.[/] After each beep, say [bold]'Hey Vaani'[/] and pause.")
+    s["wake_enabled"] = _enroll_wake()
+    if not s["wake_enabled"]:
+        console.print(f"[yellow]Wake word not set up - hold {key} to talk.[/] Retry with [bold]vaani setup --wake[/].")
 
 
 def run_wake_setup() -> None:
@@ -191,25 +250,31 @@ def run_setup() -> dict:
         console.print("[dim]WSL detected: audio devices may be missing. Typed mode (`vaani --text`) always works.[/]")
     s = load_settings()
 
+    console.print("\n[bold]Step 1 - Sarvam API key[/] [dim](stored only in " + str(config.ENV_PATH) + ")[/]")
     _step_key()
     _step_mic(s)
+    console.print("\n[bold]Step 3 - Push-to-talk key[/]")
+    s["ptt_key"] = Prompt.ask("Key to hold while speaking", default=s.get("ptt_key") or "f9").strip().lower()
     try:
         _step_wake(s)
     except Exception as e:
-        console.print(f"[yellow]Wake word step failed: {e}[/]")
+        console.print(f"[yellow]Wake word step failed: {e}. Use push-to-talk.[/]")
         s["wake_enabled"] = False
-
+    console.print("\n[bold]Step 5 - Preferences[/]")
     try:
-        s["ptt_key"] = Prompt.ask("Push-to-talk key (hold to speak)", default=s.get("ptt_key") or "f9").strip().lower()
-        s["safe_mode"] = Confirm.ask("SAFE_MODE: ask before pressing Enter/send/delete?", default=bool(s.get("safe_mode", True)))
-        s["default_lang"] = Prompt.ask("Default reply language", choices=config.SUPPORTED_LANGS,
-                                       default=s.get("default_lang") or "en-IN")
+        s["safe_mode"] = Confirm.ask("SAFE_MODE: ask before pressing Enter/send/delete/closing windows?",
+                                     default=bool(s.get("safe_mode", True)))
+        s["default_lang"] = Prompt.ask("Default reply language (used when language detection is unsure)",
+                                       choices=config.SUPPORTED_LANGS, default=s.get("default_lang") or "en-IN")
     except Exception as e:
         console.print(f"[yellow]Using default preferences ({e}).[/]")
 
     save_settings(s)
     apply_settings()
-    wake = "Say 'Hey Vaani' or " if s.get("wake_enabled") else ""
-    console.print(Panel.fit(f"Setup complete. Run [bold]vaani[/], then {wake}hold [bold]{s['ptt_key'].upper()}[/] and speak.",
+    key = s["ptt_key"].upper()
+    how = (f"Say [bold]'Hey Vaani, <command>'[/] or hold [bold]{key}[/] and speak." if s.get("wake_enabled")
+           else f"Hold [bold]{key}[/] and speak (wake word off - enable: [bold]vaani setup --wake[/]).")
+    console.print(Panel.fit(f"[green]Setup complete.[/]\n{how}\nYou can also type commands. "
+                            "Try: 'Chrome kholo aur YouTube pe lo-fi search karo'",
                             border_style="green"))
     return s

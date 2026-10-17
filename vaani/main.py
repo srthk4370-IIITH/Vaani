@@ -182,6 +182,16 @@ def run_loop(voice: bool, use_ui: bool = True) -> int:
     onboarding.apply_settings()
     if not _ensure_key():
         return 1
+    if voice and config.WAKE_ENABLED:
+        from . import wakeword
+        if not wakeword.is_enrolled():
+            # Wake word was chosen but never recorded -> it can't listen. Offer it now.
+            console.print(f"[yellow]'Hey Vaani' is not set up yet (your voice samples were never recorded).[/] "
+                          f"Until then only [bold]{config.PTT_KEY.upper()}[/] push-to-talk works.")
+            from rich.prompt import Confirm
+            if Confirm.ask("Record 'Hey Vaani' now? (3 short samples, ~15 s)", default=True):
+                onboarding.run_wake_setup()
+                onboarding.apply_settings()
     _setup_tools()
     if use_ui:
         try:
