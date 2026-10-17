@@ -11,10 +11,11 @@ Source spec: `Vaani_PRD.pdf`. Sarvam model/endpoint reference: `model info/` scr
 
 ### Design principles
 - **Local-first, no local AI models.** Onboarding, settings, API key storage, voice-activity detection (energy
-  threshold), audio record/playback, and all laptop control run on-device. All AI calls (STT incl. wake-word
-  check, translate, TTS, LLM agent, vision) go to Sarvam's cloud.
-- **Two ways to activate:** wake word **"Hey Vaani"** (local energy VAD captures each utterance -> Sarvam STT -> fuzzy match
-  "hey vaani/vani"; non-matches silently ignored; costs credits, audio leaves device) and
+  threshold), wake-word spotting (numpy MFCC + DTW vs. the user's own 3 enrolled samples), audio record/playback,
+  and all laptop control run on-device. AI calls (STT of the command, translate, TTS, LLM agent, vision) go to Sarvam's cloud.
+- **Two ways to activate:** wake word **"Hey Vaani"** (local energy VAD captures each utterance -> local MFCC+DTW
+  match against enrolled templates in ~/.vaani/wake_templates.npz; non-matches silently ignored with NO API call;
+  only the command after the wake phrase is sent to STT) and
   **hold F9** push-to-talk (configurable).
 - **Safe.** Whitelisted tools only, no shell execution of model strings, SAFE_MODE confirmation before
   Enter/send/delete/purchase, `pyautogui.FAILSAFE` on, `execute_tool` never raises.
@@ -23,7 +24,7 @@ Source spec: `Vaani_PRD.pdf`. Sarvam model/endpoint reference: `model info/` scr
 ### Flow
 ```
 [hold F9] -> record 16 kHz mono WAV (local)
-[wake] local VAD utterance -> STT -> contains "Hey Vaani"? no: ignore | yes+command: use rest | yes only: beep, record
+[wake] local VAD utterance -> local MFCC+DTW match? no: ignore (no API) | yes+command: trim WAV after wake -> STT | yes only: beep, record -> STT
   -> Sarvam STT (saaras:v4, mode=translate)  -> English text + detected language
   -> Sarvam 105B agent (tool-calling loop, max 6 steps)
        laptop tools: open_app, open_url, search_web, type_text, press_key, hotkey, scroll,
@@ -40,11 +41,11 @@ vaani/
   config.py         models, endpoints, constants, paths (~/.vaani), SAFE_MODE
   sarvam_client.py  stt_translate, translate, tts, chat, vision_read, ping  (SarvamError)
   audio_io.py       record_while_key_held, record_until_silence, play_audio, beep, mic_check
-  wakeword.py       contains_wake(text): fuzzy "Hey Vaani" match on STT transcript (no local model)
+  wakeword.py       local KWS: enroll()/matches() numpy MFCC+DTW; contains_wake() strips wake text
   trigger.py        wait_for_command(): wake word OR PTT, returns wav path
   tools.py          TOOL_SCHEMAS, execute_tool(name, args) -> {"ok","result"}
   agent.py          run_agent(command_en, lang, on_event) -> str
-  onboarding.py     `vaani setup`: API key, mic test, wake-word opt-in, preferences
+  onboarding.py     `vaani setup`: API key, mic test, wake-word enrollment (3 samples + verify), preferences
   main.py           CLI + rich live console + main loop + error voice-back
 HANDBOOK.md, README.md, pyproject.toml, install.sh, install.ps1, .gitignore
 ```
@@ -66,14 +67,14 @@ Auth header: `api-subscription-key: <key>`.
 |---|---|---|
 | config.py | main | ✅ done, models verified by client agent |
 | sarvam_client.py | agent B | ✅ done (docs-verified, untested live) |
-| audio_io.py, wakeword.py, trigger.py | agent A | ✅ done (energy VAD + cloud wake check, no local model) |
+| audio_io.py, wakeword.py, trigger.py | agent A | ✅ done (energy VAD + local MFCC/DTW wake spotting, no model, no API) |
 | tools.py | agent C | ✅ done, tested on Windows (16 tools) |
 | agent.py | agent D | ✅ done, offline-tested (native+JSON fallback) |
 | main.py, onboarding.py | agent E | ✅ done (help/doctor tested offline) |
 | packaging (pyproject, install scripts, README, .gitignore) | agent F | ✅ done |
 | deps install (pip) | background | ✅ done (py3.14) |
 | Vosk wake model download | - | ❌ removed per user: no local AI models |
-| Cloud-checked wake word (VAD + STT + fuzzy match) | agent A + main | ✅ done |
+| Local wake word (MFCC + DTW, personalized enrollment; `vaani setup --wake`) | agent A + main | ✅ done |
 | guardrails.py (local rules + Sarvam AI risk review + audit log) | guard agent | ✅ done, offline-tested |
 | Terminal UI (ui.py: Codex-style transcript, prompt_toolkit toolbar w/ live state + mic meter, typed+voice queue, slash cmds, in-prompt SAFE_MODE confirm, rich fallback, `--new-window`, `--simple`) | UI agent | ✅ done (render-tested; interactive untested) |
 
@@ -87,10 +88,9 @@ All AI stays on Sarvam cloud; execution + storage are local. Every `tools.execut
 
 ## Still to do
 - [ ] Integrate all modules; `py -m vaani --text "open notepad"` works end to end (with key)
-- [ ] Offline smoke tests (no key): imports, `execute_tool` safety, wake VAD init, `contains_wake` matching, onboarding flow
+- [ ] Offline smoke tests (no key): imports, `execute_tool` safety, wake VAD init, `contains_wake` + MFCC/DTW `matches` on TTS audio, onboarding flow
 - [ ] User provides Sarvam API key -> `vaani setup` -> run 5 demo commands (PRD §8)
 - [ ] Tune VAD threshold / min-max utterance length live; verify "Hey Vaani" survives STT (Vani/Vaani/Wani)
-- [ ] Consider rate-limiting wake STT calls in noisy rooms (credit usage)
 - [ ] Optionally `pip uninstall vosk` and delete old `~/.vaani/models` on machines that ran earlier builds
 - [ ] Commit + push to `origin` (github.com/srthk4370-IIITH/Vaani) with `.env`, `~/.vaani`, tmp ignored
 
@@ -104,7 +104,7 @@ All AI stays on Sarvam cloud; execution + storage are local. Every `tools.execut
 ## Usage (target)
 ```
 pip install -e .        # or ./install.sh  /  .\install.ps1
-vaani setup             # asks for Sarvam API key, mic test, wake word opt-in
+vaani setup             # asks for Sarvam API key, mic test, wake word enrollment (`vaani setup --wake` re-enrolls)
 vaani                   # say "Hey Vaani ..." or hold F9
 vaani --text "open notepad"   # typed command, no mic
 ```

@@ -717,6 +717,236 @@ def wait(seconds=1) -> dict:
     time.sleep(s)
     return _ok(f"Waited {s:g} seconds")
 
+# --------------------------------------------------------------------------- system
+
+_MEDIA_KEYS = {"play_pause": "playpause", "next": "nexttrack", "previous": "prevtrack",
+               "stop": "stop", "mute": "volumemute"}
+_PLAYERCTL = {"play_pause": "play-pause", "next": "next", "previous": "previous", "stop": "stop"}
+
+
+def media_control(action: str = "play_pause") -> dict:
+    a = str(action or "").strip().lower().replace("-", "_").replace(" ", "_")
+    a = {"play": "play_pause", "pause": "play_pause", "toggle": "play_pause", "prev": "previous",
+         "skip": "next", "unmute": "mute"}.get(a, a)
+    if a not in _MEDIA_KEYS:
+        return _fail("action must be one of play_pause, next, previous, stop, mute")
+    if IS_LINUX and not IS_WSL:
+        try:
+            if a in _PLAYERCTL and shutil.which("playerctl"):
+                if _run(["playerctl", _PLAYERCTL[a]]).returncode == 0:
+                    return _ok(f"Media: {a}")
+            if a == "mute" and shutil.which("pactl"):
+                if _run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"]).returncode == 0:
+                    return _ok("Media: mute toggled")
+        except Exception:
+            pass
+    if IS_MAC and a == "mute":
+        try:
+            r = _run(["osascript", "-e", "set volume output muted (not (output muted of (get volume settings)))"])
+            if r.returncode == 0:
+                return _ok("Media: mute toggled")
+        except Exception:
+            pass
+    gui, err = _gui()
+    if err:
+        return _fail(err)
+    try:
+        gui.press(_MEDIA_KEYS[a])
+        return _ok(f"Media: {a}")
+    except Exception as e:
+        return _fail(f"Media key failed: {e}")
+
+
+_KNOWN_DIRS = {"desktop": "Desktop", "downloads": "Downloads", "download": "Downloads",
+               "documents": "Documents", "document": "Documents", "docs": "Documents",
+               "pictures": "Pictures", "photos": "Pictures", "music": "Music",
+               "videos": "Videos", "movies": "Movies" if IS_MAC else "Videos", "home": ""}
+_EXEC_EXT = {".exe", ".bat", ".cmd", ".ps1", ".sh", ".msi", ".vbs", ".js", ".jse", ".vbe", ".wsf",
+             ".scr", ".com", ".pif", ".cpl", ".msc", ".hta", ".jar", ".app", ".command", ".lnk",
+             ".reg", ".psm1", ".py", ".pyw", ".run", ".bin", ".appimage", ".desktop", ".url"}
+
+
+def is_executable_path(p: str) -> bool:
+    try:
+        path = Path(str(p).strip().strip('"'))
+        if path.suffix.lower() in _EXEC_EXT:
+            return True
+        return (not IS_WIN) and path.is_file() and os.access(path, os.X_OK)
+    except Exception:
+        return False
+
+
+def _find_file(name: str):
+    home = Path.home()
+    needle = name.lower()
+    hits = []
+    for base in ("Desktop", "Downloads", "Documents"):
+        root = home / base
+        if not root.is_dir():
+            continue
+        base_depth = len(root.parts)
+        for dirpath, dirnames, filenames in os.walk(root):
+            depth = len(Path(dirpath).parts) - base_depth
+            if depth >= 3:
+                dirnames[:] = []
+            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "node_modules"]
+            for f in dirnames + filenames:
+                if needle in f.lower():
+                    hits.append(Path(dirpath) / f)
+                    if len(hits) >= 200:
+                        break
+            if len(hits) >= 200:
+                break
+    if not hits:
+        return None
+    hits.sort(key=lambda p: (p.name.lower() != needle, Path(p.stem).name.lower() != needle,
+                             len(p.name), len(p.parts)))
+    return hits[0]
+
+
+def open_path(name_or_path: str = "") -> dict:
+    q = str(name_or_path or "").strip().strip('"')
+    if not q:
+        return _fail("Say which file or folder to open")
+    key = q.lower().rstrip("/\\")
+    target = None
+    if key in _KNOWN_DIRS:
+        target = Path.home() / _KNOWN_DIRS[key]
+        if key == "home":
+            target = Path.home()
+    else:
+        p = Path(os.path.expandvars(os.path.expanduser(q)))
+        if p.exists():
+            target = p
+        else:
+            target = _find_file(q)
+    if target is None or not Path(target).exists():
+        return _fail(f"Couldn't find '{q}' in Desktop, Downloads or Documents")
+    target = Path(target).resolve()
+    if target.is_file() and is_executable_path(str(target)):
+        return _fail("Refusing to open an executable/script file")
+    try:
+        _open_target(str(target))
+        return _ok(f"Opened {target}")
+    except Exception as e:
+        return _fail(f"Could not open {target}: {e}")
+
+
+def _battery():
+    try:
+        import psutil  # type: ignore
+        b = psutil.sensors_battery()
+        if b is None:
+            return None
+        return int(b.percent), bool(b.power_plugged)
+    except Exception:
+        pass
+    try:
+        if IS_WIN:
+            r = _run(["powershell", "-NoProfile", "-Command",
+                      "$b=Get-CimInstance Win32_Battery|Select-Object -First 1;"
+                      "if($b){\"$($b.EstimatedChargeRemaining),$($b.BatteryStatus)\"}"], timeout=10)
+            s = r.stdout.strip()
+            if s and "," in s:
+                pct, st = s.split(",", 1)
+                return int(pct), st.strip() in ("2", "6", "7", "8", "9")
+        elif IS_MAC:
+            r = _run(["pmset", "-g", "batt"])
+            m = re.search(r"(\d+)%;\s*([a-zA-Z ]+)", r.stdout)
+            if m:
+                return int(m.group(1)), "discharging" not in m.group(2).lower()
+        else:
+            for d in Path("/sys/class/power_supply").glob("BAT*"):
+                pct = int((d / "capacity").read_text().strip())
+                st = (d / "status").read_text().strip().lower()
+                return pct, st != "discharging"
+    except Exception:
+        pass
+    return None
+
+
+def system_info() -> dict:
+    import platform
+    parts = [f"OS: {platform.system()} {platform.release()}"]
+    bat = _battery()
+    parts.append(f"Battery: {bat[0]}% ({'charging/plugged in' if bat[1] else 'on battery'})" if bat
+                 else "Battery: not available")
+    try:
+        import psutil  # type: ignore
+        parts.append(f"CPU: {psutil.cpu_percent(interval=0.3):.0f}%")
+        parts.append(f"RAM: {psutil.virtual_memory().percent:.0f}% used")
+    except Exception:
+        try:
+            if IS_WIN:
+                r = _run(["powershell", "-NoProfile", "-Command",
+                          "$c=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;"
+                          "$o=Get-CimInstance Win32_OperatingSystem;"
+                          "\"$c,$([math]::Round(100-100*$o.FreePhysicalMemory/$o.TotalVisibleMemorySize))\""],
+                         timeout=10)
+                c, m = r.stdout.strip().split(",")
+                parts.append(f"CPU: {c}%")
+                parts.append(f"RAM: {m}% used")
+            elif hasattr(os, "getloadavg"):
+                parts.append(f"Load avg: {os.getloadavg()[0]:.2f}")
+        except Exception:
+            pass
+    try:
+        du = shutil.disk_usage(str(Path.home()))
+        parts.append(f"Disk free: {du.free / 1e9:.1f} GB of {du.total / 1e9:.0f} GB")
+    except Exception:
+        pass
+    return _ok("; ".join(parts))
+
+
+def set_brightness(level=50) -> dict:
+    try:
+        lv = int(float(level))
+    except Exception:
+        return _fail("level must be a number 0-100")
+    lv = max(0, min(100, lv))
+    try:
+        if IS_WIN or IS_WSL:
+            ps = "powershell.exe" if IS_WSL else "powershell"
+            r = _run([ps, "-NoProfile", "-Command",
+                      "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods)"
+                      f".WmiSetBrightness(1,{lv})"], timeout=10)
+            if r.returncode == 0 and not r.stderr.strip():
+                return _ok(f"Brightness set to {lv}%")
+            return _fail("Brightness control not supported on this display (external monitor?)")
+        if IS_MAC:
+            if shutil.which("brightness"):
+                r = _run(["brightness", f"{lv / 100:.2f}"])
+                if r.returncode == 0:
+                    return _ok(f"Brightness set to {lv}%")
+            return _fail("Install the 'brightness' CLI (brew install brightness)")
+        if shutil.which("brightnessctl"):
+            r = _run(["brightnessctl", "set", f"{lv}%"])
+            if r.returncode == 0:
+                return _ok(f"Brightness set to {lv}%")
+        return _fail("Install brightnessctl to control brightness")
+    except Exception as e:
+        return _fail(f"Brightness change failed: {e}")
+
+
+def lock_screen() -> dict:
+    try:
+        if IS_WIN:
+            _popen(["rundll32.exe", "user32.dll,LockWorkStation"])
+        elif IS_WSL:
+            _popen(["rundll32.exe", "user32.dll,LockWorkStation"])
+        elif IS_MAC:
+            _popen(["pmset", "displaysleepnow"])
+        else:
+            if shutil.which("loginctl"):
+                _popen(["loginctl", "lock-session"])
+            elif shutil.which("xdg-screensaver"):
+                _popen(["xdg-screensaver", "lock"])
+            else:
+                return _fail("No screen locker found (loginctl)")
+        return _ok("Screen locked")
+    except Exception as e:
+        return _fail(f"Lock failed: {e}")
+
 # --------------------------------------------------------------------------- registry
 
 def _fn(name, desc, props=None, required=None):
@@ -762,6 +992,14 @@ TOOL_SCHEMAS = [
     _fn("wait", "Wait a few seconds (max 5) e.g. for a page to load.",
         {"seconds": {"type": "number", "maximum": 5}}, ["seconds"]),
     _fn("close_window", "Close the currently active window (asks for confirmation)."),
+    _fn("media_control", "Control media playback (music/video): play/pause toggle, next/previous track, stop, mute toggle.",
+        {"action": {"type": "string", "enum": ["play_pause", "next", "previous", "stop", "mute"]}}, ["action"]),
+    _fn("open_path", "Open a file or folder. Known folders: desktop, downloads, documents, pictures, music, videos, home; or a full path; or part of a file name (searched in Desktop/Downloads/Documents). Never opens programs/scripts.",
+        {"name_or_path": _S}, ["name_or_path"]),
+    _fn("system_info", "Get battery % and charging state, OS, CPU and RAM usage, and free disk space."),
+    _fn("set_brightness", "Set laptop screen brightness 0-100.",
+        {"level": {"type": "integer", "minimum": 0, "maximum": 100}}, ["level"]),
+    _fn("lock_screen", "Lock the computer screen (asks for confirmation)."),
 ]
 
 _REGISTRY = {
@@ -773,6 +1011,8 @@ _REGISTRY = {
     "transliterate_text": transliterate_text, "detect_language": detect_language,
     "read_image_text": read_image_text, "ask_sarvam": ask_sarvam,
     "read_document": read_document,
+    "media_control": media_control, "open_path": open_path, "system_info": system_info,
+    "set_brightness": set_brightness, "lock_screen": lock_screen,
 }
 
 

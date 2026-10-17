@@ -15,9 +15,13 @@ from . import config
 
 READ_ONLY = {"screenshot", "read_screen", "read_clipboard", "get_time", "translate_text",
              "speak", "scroll", "wait", "search_web", "open_url",
-             "transliterate_text", "detect_language", "read_image_text", "ask_sarvam", "read_document"}
+             "transliterate_text", "detect_language", "read_image_text", "ask_sarvam", "read_document",
+             "system_info"}
 # Local, harmless actions that need no cloud review.
-SAFE_LOCAL = {"set_volume"}
+SAFE_LOCAL = {"set_volume", "media_control", "set_brightness"}
+EXEC_EXT_RE = re.compile(
+    r"\.(exe|bat|cmd|ps1|psm1|sh|msi|vbs|vbe|js|jse|wsf|scr|com|pif|cpl|msc|hta|jar|app|command|lnk|"
+    r"reg|py|pyw|run|bin|appimage|desktop|url)\s*$", re.I)
 
 DELETE_INTENT_RE = re.compile(
     r"\b(delete|deleting|remove|removing|erase|hatao|hata\s*do|mitao|mita\s*do|uninstall|"
@@ -69,6 +73,13 @@ def _local(tool, args, cmd):
         return _d(True, False, "read-only")
     if tool in SAFE_LOCAL:
         return _d(True, False, "harmless local action")
+    if tool == "open_path":
+        p = str(args.get("name_or_path", "")).strip().strip('"')
+        if EXEC_EXT_RE.search(p):
+            return _d(False, False, "opening programs/scripts is not allowed")
+        return _d(True, False, "opening a file/folder")
+    if tool == "lock_screen":
+        return _d(True, True, "this locks the screen")
 
     # Shell-dangerous strings typed anywhere: always blocked.
     if tool == "type_text" and SHELL_DANGER_RE.search(str(args.get("text", ""))):

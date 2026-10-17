@@ -11,6 +11,33 @@ import requests
 from . import config
 
 
+_SESSION = requests.Session()  # keep-alive / connection reuse for every Sarvam call
+_SESSION.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8))
+
+# Unicode block per target language (for skipping no-op translations)
+_SCRIPT_RANGES = {
+    "hi": (0x0900, 0x097F), "mr": (0x0900, 0x097F), "bn": (0x0980, 0x09FF),
+    "pa": (0x0A00, 0x0A7F), "gu": (0x0A80, 0x0AFF), "od": (0x0B00, 0x0B7F),
+    "ta": (0x0B80, 0x0BFF), "te": (0x0C00, 0x0C7F), "kn": (0x0C80, 0x0CFF),
+    "ml": (0x0D00, 0x0D7F),
+}
+
+
+def in_target_script(text, lang, thresh=0.6) -> bool:
+    """True when `text` is already mostly written in `lang`'s script."""
+    letters = [c for c in (text or "") if c.isalpha()]
+    if not letters:
+        return True
+    base = str(lang or "").split("-")[0].lower()
+    base = "od" if base == "or" else base
+    if base == "en":
+        return sum(1 for c in letters if c.isascii()) / len(letters) >= 0.85
+    rng = _SCRIPT_RANGES.get(base)
+    if not rng:
+        return False
+    return sum(1 for c in letters if rng[0] <= ord(c) <= rng[1]) / len(letters) >= thresh
+
+
 class SarvamError(Exception):
     def __init__(self, msg, status=None, tools_unsupported=False):
         super().__init__(msg)
@@ -43,7 +70,7 @@ def _post(url, *, json=None, data=None, files_factory=None, timeout=None):
         try:
             files = files_factory() if files_factory else None
             try:
-                r = requests.post(url, headers=_headers(json_body=files is None),
+                r = _SESSION.post(url, headers=_headers(json_body=files is None),
                                   json=json, data=data, files=files, timeout=timeout)
             finally:
                 if files:
@@ -152,8 +179,8 @@ def stt_translate(wav_path) -> dict:
 def translate(text, src, tgt) -> str:
     if not text or not text.strip():
         return text or ""
-    if src == tgt:
-        return text
+    if src == tgt or in_target_script(text, tgt):
+        return text  # already in target script: skip the API call
     limit = getattr(config, "TRANSLATE_CHAR_LIMIT", 1000)
     out = []
     for chunk in _chunk(text, limit):
@@ -217,7 +244,8 @@ def tts(text, lang_code) -> bytes:
             "language_code": lang,  # docs: required field is `language_code` (no target_language_code)
             "model": model,
             "speaker": speaker,
-            "speech_sample_rate": getattr(config, "TTS_SAMPLE_RATE", 24000),
+            "speech_sample_rate": 22050,  # API default; smaller payload than 24k
+            "pace": 1.0,
             "output_audio_codec": "wav",
         })
         for a in res.get("audios") or []:
@@ -228,12 +256,14 @@ def tts(text, lang_code) -> bytes:
 
 
 # ---------------------------------------------------------------- chat
-def chat(messages, tools=None, model=None, url=None) -> dict:
+def chat(messages, tools=None, model=None, url=None, max_tokens=400) -> dict:
     body = {
         "model": model or config.AGENT_MODEL,
         "messages": messages,
         "reasoning_effort": getattr(config, "REASONING_EFFORT", None),  # None -> JSON null = off
     }
+    if max_tokens:
+        body["max_tokens"] = max_tokens
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -326,7 +356,7 @@ def digitise_document(path, lang="en-IN", output_format="md", max_wait=90, max_c
     ext = os.path.splitext(path)[1].lower()
     mime = _DOC_MIME.get(ext, "application/octet-stream")
     with open(path, "rb") as fh:
-        r = requests.post(f"{DOC_AI_BASE}/job/digitise", headers=_doc_headers(),
+        r = _SESSION.post(f"{DOC_AI_BASE}/job/digitise", headers=_doc_headers(),
                           data={"language": _norm_lang(lang) or "en-IN", "output_format": output_format,
                                 "content_type": "printed", "auto_orient": "true"},
                           files={"file": (os.path.basename(path), fh, mime)},
@@ -343,13 +373,13 @@ def digitise_document(path, lang="en-IN", output_format="md", max_wait=90, max_c
         if time.time() > deadline:
             raise SarvamError(f"doc-ai job {job} still '{status}' after {max_wait}s")
         time.sleep(2)
-        r = requests.get(f"{DOC_AI_BASE}/job/{job}/status", headers=_doc_headers(), timeout=30)
+        r = _SESSION.get(f"{DOC_AI_BASE}/job/{job}/status", headers=_doc_headers(), timeout=30)
         if r.status_code >= 400:
             raise SarvamError(f"doc-ai status HTTP {r.status_code}: {r.text[:300]}", r.status_code)
         status = (r.json().get("status") or "").lower()
     if status not in ("completed", "partially_completed"):
         raise SarvamError(f"doc-ai job {job} ended with status '{status}'")
-    r = requests.get(f"{DOC_AI_BASE}/job/{job}/results", headers=_doc_headers(), timeout=60)
+    r = _SESSION.get(f"{DOC_AI_BASE}/job/{job}/results", headers=_doc_headers(), timeout=60)
     if r.status_code >= 400:
         raise SarvamError(f"doc-ai results HTTP {r.status_code}: {r.text[:300]}", r.status_code)
     parts = []

@@ -113,46 +113,18 @@ def lang_is_en(stt: dict) -> bool:
 
 
 def resolve_wake(stt: dict, source: str, on_listen=None, timings: dict | None = None):
-    """For wake-sourced clips: verify the wake phrase and strip it. Returns the command stt
-    dict, or None if no wake word was heard. Records a follow-up clip if only the wake word was said."""
+    """Wake-sourced clips were already verified LOCALLY (wakeword.matches, MFCC+DTW) and
+    trimmed to the command before STT, so no cloud wake check happens here. Only strips a
+    leftover spoken wake phrase from the transcript. Returns the command stt dict (never None
+    for valid input; kept Optional for callers)."""
     if source != "wake":
         return stt
-    from . import sarvam_client, wakeword
-    raw0 = (stt.get("raw_transcript") or "").strip()
-    en0 = (stt.get("text_en") or "").strip()
-    matched, rest = wakeword.contains_wake(raw0)
-    rest_en = ""
-    m_en, r_en = wakeword.contains_wake(en0)
-    if m_en:
-        rest_en = (r_en or "").strip()
-    if not (matched or m_en):
-        if timings is None:
-            console.print(f"[dim]  ignored: {_short(raw0 or en0, 100)}[/]")
-        return None
-    if not (rest or "").strip() and not rest_en:
-        # Wake word only: prompt and record the actual command.
-        from . import audio_io
-        audio_io.beep("listen")
-        if on_listen:
-            on_listen("wake")
-        wav = audio_io.record_until_silence()
-        if timings is not None and "on_stt" in timings:
-            timings["on_stt"]()
-        t = _timer()
-        stt = sarvam_client.stt_translate(wav)
-        if timings is None:
-            _dim("stt", t())
-        else:
-            timings["stt"] = timings.get("stt", 0.0) + t()
-        return stt
-    # Wake word + command in one phrase: keep the English remainder.
-    if not rest_en and lang_is_en(stt):
-        rest_en = (rest or "").strip()
-    if not rest_en:
-        rest_en = en0
+    from . import wakeword
     stt = dict(stt)
-    stt["text_en"] = rest_en
-    stt["raw_transcript"] = (rest or "").strip() or raw0
+    for key in ("raw_transcript", "text_en"):
+        m, rest = wakeword.contains_wake(stt.get(key) or "")
+        if m and rest.strip():
+            stt[key] = rest.strip()
     return stt
 
 
@@ -304,8 +276,11 @@ def run_doctor() -> int:
         row("Microphone", bool(devs), f"{len(devs)} input device(s)")
     except Exception as e:
         row("Microphone", False, e)
-    row("Wake word", True,
-        f"cloud-checked VAD (no local model), {'enabled' if config.WAKE_ENABLED else 'disabled'}")
+    from . import wakeword
+    enrolled = wakeword.is_enrolled()
+    row("Wake word", enrolled or not config.WAKE_ENABLED,
+        f"local MFCC+DTW (no API, no model), enrolled {'yes' if enrolled else 'no - run `vaani setup --wake`'}, "
+        f"{'enabled' if config.WAKE_ENABLED else 'disabled'}")
     try:
         import pyautogui  # noqa: F401
         row("pyautogui import", True)
@@ -363,6 +338,7 @@ def cli(argv=None) -> None:
     p = argparse.ArgumentParser(prog="vaani", description="Vaani - voice assistant for your laptop, powered by Sarvam AI.")
     p.add_argument("command", nargs="?", choices=["run", "setup", "doctor"], default="run",
                    help="run (default) | setup | doctor")
+    p.add_argument("--wake", action="store_true", help="with `setup`: only (re-)enroll the wake word")
     p.add_argument("--text", "-t", help="typed command (skips the microphone)")
     p.add_argument("--lang", "-l", choices=config.SUPPORTED_LANGS,
                    help="language of --text and the reply (default en-IN)")
@@ -375,7 +351,10 @@ def cli(argv=None) -> None:
     if a.new_window:
         sys.exit(open_new_window([x for x in (argv if argv is not None else sys.argv[1:]) if x != "--new-window"]))
     try:
-        if a.command == "setup":
+        if a.command == "setup" and a.wake:
+            onboarding.run_wake_setup()
+            code = 0
+        elif a.command == "setup":
             onboarding.run_setup()
             code = 0
         elif a.command == "doctor":

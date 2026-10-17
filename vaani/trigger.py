@@ -9,7 +9,10 @@ import queue
 import threading
 
 from . import audio_io, config
+from . import wakeword
 from .wakeword import WakeListener
+
+CMD_AFTER_WAKE_SEC = 0.5  # voiced audio after the wake phrase that counts as an inline command
 
 _warned: set[str] = set()
 
@@ -20,14 +23,43 @@ def _warn_once(msg: str) -> None:
         _warned.add(msg)
 
 
+def _wait_wake(stop_event=None):
+    """Loop VAD utterances, matching each LOCALLY (MFCC+DTW, no network) until one
+    starts with the wake phrase. Returns (wav_path, cut_sec) or None if stopped."""
+    data = wakeword.load_templates()
+    while True:
+        path = WakeListener().wait_for_utterance(stop_event=stop_event)
+        if not path:
+            return None
+        ok, _score, cut = wakeword.matches(path, data)
+        if ok:
+            return path, cut
+
+
+def _wake_command(path: str, cut: float, on_listen=None) -> str:
+    """Inline command after the wake phrase -> trimmed WAV; else beep and record the command."""
+    if wakeword.speech_after(path, cut) >= CMD_AFTER_WAKE_SEC:
+        return wakeword.trim_wav(path, cut)
+    audio_io.beep("listen")
+    if on_listen:
+        try:
+            on_listen("wake")
+        except Exception:
+            pass
+    return audio_io.record_until_silence()
+
+
 def wait_for_command(use_wake: bool = True, ptt_key: str = config.PTT_KEY,
                      on_listen=None) -> tuple[str, str]:
     """Block until PTT key press (records while held) or a VAD-captured utterance.
 
-    Returns (wav_path, source) with source "ptt" or "wake". For "wake" the caller
-    runs STT and checks wakeword.contains_wake(); for "ptt" the wav is the command.
+    Returns (wav_path, source) with source "ptt" or "wake". The wake phrase is detected
+    locally (no API call); for both sources the returned wav is the command only.
     on_listen(source) is called when PTT recording starts / an utterance is captured.
     Raises audio_io.ClipTooShort / audio_io.AudioUnavailable."""
+    if use_wake and not wakeword.is_enrolled():
+        _warn_once("Wake word not enrolled - run `vaani setup` to enroll wake word. Push-to-talk works.")
+        use_wake = False
     try:
         from pynput import keyboard
     except Exception as e:  # e.g. headless Linux without X / Wayland restrictions
@@ -37,10 +69,8 @@ def wait_for_command(use_wake: bool = True, ptt_key: str = config.PTT_KEY,
         _warn_once(f"Push-to-talk unavailable ({e}); using wake word only.")
 
     if keyboard is None:
-        path = WakeListener().wait_for_utterance()
-        if on_listen:
-            on_listen("wake")
-        return path, "wake"
+        path, cut = _wait_wake()
+        return _wake_command(path, cut, on_listen), "wake"
 
     events: queue.Queue = queue.Queue()
     stop = threading.Event()
@@ -64,9 +94,9 @@ def wait_for_command(use_wake: bool = True, ptt_key: str = config.PTT_KEY,
     if use_wake:
         def wake_worker():
             try:
-                path = WakeListener().wait_for_utterance(stop_event=stop)
-                if path:
-                    events.put(("wake", path))
+                hit = _wait_wake(stop_event=stop)
+                if hit:
+                    events.put(("wake", hit))
             except Exception as e:
                 events.put(("wake_error", e))
 
@@ -89,12 +119,8 @@ def wait_for_command(use_wake: bool = True, ptt_key: str = config.PTT_KEY,
             wake_thread.join(timeout=2)  # VAD stream closed before PTT opens one
 
         if src == "wake":
-            if on_listen:
-                try:
-                    on_listen("wake")
-                except Exception:
-                    pass
-            return payload, "wake"
+            path, cut = payload
+            return _wake_command(path, cut, on_listen), "wake"
 
         if on_listen:
             try:

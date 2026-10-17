@@ -5,6 +5,7 @@ process-wide) to a JSON-in-prompt fallback.
 """
 import json
 import re
+from collections import deque
 
 from . import config
 from . import sarvam_client as sc
@@ -36,6 +37,38 @@ JSON_FALLBACK_SUFFIX = (
     '{{"tool": "<tool name>", "args": {{...}}}} to call a tool, or\n'
     '{{"final": "<short final message>"}} when done.'
 )
+
+LANG_RULE = ("\n- Write the final message in the language {lang} (native script), not English, "
+             "unless {lang} is en-IN.")
+
+# ---- session-only conversation memory (in-process, never persisted)
+MEMORY_TURNS = 4
+MEMORY_MAX_CHARS = 2000
+_memory = deque(maxlen=MEMORY_TURNS)  # (user_cmd_en, final_reply, tools_summary)
+
+
+def reset_memory():
+    _memory.clear()
+
+
+def _remember(cmd, reply, tools_used):
+    summ = ""
+    if tools_used:
+        summ = "[tools used: " + ", ".join(tools_used)[:200] + "]"
+    _memory.append((cmd[:600], (reply or "")[:600], summ))
+
+
+def _history_msgs():
+    out, total = [], 0
+    for cmd, reply, summ in reversed(_memory):  # newest first, drop oldest when over budget
+        a = f"{summ} {reply}".strip() if summ else reply
+        n = len(cmd) + len(a)
+        if total + n > MEMORY_MAX_CHARS:
+            break
+        total += n
+        out[:0] = [{"role": "user", "content": cmd}, {"role": "assistant", "content": a or "Done."}]
+    return out
+
 
 _json_mode = False  # sticky: set once the API says native tools are unsupported
 
@@ -126,10 +159,16 @@ class _Runner:
         self.fail_counts = {}
         self.user_command = ""
         self.names = _tool_names()
+        self.tools_used = []
 
     def run_tool(self, name, args):
         """Execute a tool; returns (result_text, stop_message_or_None)."""
         _emit(self.on_event, "tool_call", {"name": name, "args": args})
+        try:
+            brief = json.dumps(args, ensure_ascii=False)[:60]
+        except (TypeError, ValueError):
+            brief = ""
+        self.tools_used.append(f"{name}({brief})")
         if name not in self.names:
             res = {"ok": False, "result": f"Unknown tool '{name}'. Use only the provided tools."}
         else:
@@ -154,13 +193,18 @@ class _Runner:
 
 
 def _system(lang):
-    return SYSTEM_PROMPT.format(OS=config.OS_NAME, lang=lang or "English")
+    lang = lang or "en-IN"
+    p = SYSTEM_PROMPT.format(OS=config.OS_NAME, lang=lang)
+    if not str(lang).startswith("en"):
+        p += LANG_RULE.format(lang=lang)
+    return p
 
 
 def _run_native(command_en, lang, runner):
     """Returns final str, or None if we must switch to JSON mode."""
     global _json_mode
-    msgs = [{"role": "system", "content": _system(lang)}, {"role": "user", "content": command_en}]
+    msgs = [{"role": "system", "content": _system(lang)}, *_history_msgs(),
+            {"role": "user", "content": command_en}]
     for _ in range(config.MAX_AGENT_STEPS):
         try:
             resp = sc.chat(msgs, tools=tools.TOOL_SCHEMAS)
@@ -202,7 +246,8 @@ def _run_native(command_en, lang, runner):
 
 def _run_json(command_en, lang, runner, steps):
     sys_prompt = _system(lang) + JSON_FALLBACK_SUFFIX.format(tool_list=_tool_list_text())
-    msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": command_en}]
+    msgs = [{"role": "system", "content": sys_prompt}, *_history_msgs(),
+            {"role": "user", "content": command_en}]
     for _ in range(steps):
         resp = sc.chat(msgs)
         msg = ((resp or {}).get("choices") or [{}])[0].get("message") or {}
@@ -231,8 +276,10 @@ def run_agent(command_en: str, lang: str, on_event=None) -> str:
         return "I didn't catch that."
     runner = _Runner(on_event)
     runner.user_command = command_en
+    out = None
     if not _json_mode:
         out = _run_native(command_en, lang, runner)
-        if out is not None:
-            return out
-    return _run_json(command_en, lang, runner, config.MAX_AGENT_STEPS)
+    if out is None:
+        out = _run_json(command_en, lang, runner, config.MAX_AGENT_STEPS)
+    _remember(command_en, out, runner.tools_used)
+    return out

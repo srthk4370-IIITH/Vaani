@@ -132,20 +132,59 @@ def _step_mic(s: dict) -> None:
             console.print("[dim]Tip: WSL often has no audio. Use `vaani --text \"...\"` or run on Windows directly.[/]")
 
 
+def _enroll_wake() -> bool:
+    """Record 3 samples, then a verify test. Returns True when enrolled."""
+    from . import wakeword
+    while True:
+        console.print("[dim]Speak naturally, about as loud as you normally would.[/]")
+        try:
+            data = wakeword.enroll(3, on_prompt=lambda m: console.print(f"  [cyan]{m}[/]"))
+        except Exception as e:
+            console.print(f"[yellow]Enrollment failed: {e}[/]")
+            if Confirm.ask("Try again?", default=True):
+                continue
+            return False
+        console.print(f"[green]Saved 3 samples[/] [dim](threshold {data['threshold']:.1f})[/]")
+        console.print("  [cyan]Verify: say 'Hey Vaani' once more...[/]")
+        try:
+            from . import audio_io
+            wav = audio_io.record_until_silence(max_sec=4.0, silence_sec=0.6, no_speech_timeout=6.0)
+            ok, score, _ = wakeword.matches(wav)
+            console.print(f"  {'[green]matched[/]' if ok else '[red]not matched[/]'} "
+                          f"[dim](score {score:.1f} / threshold {data['threshold']:.1f}, lower is closer)[/]")
+        except Exception as e:
+            ok = False
+            console.print(f"  [yellow]verify skipped: {e}[/]")
+        if not Confirm.ask("Re-record the wake word?", default=not ok):
+            return True
+
+
 def _step_wake(s: dict) -> None:
     console.print(
-        "[bold]Wake word 'Hey Vaani'[/]: Vaani listens locally for speech, and sends each spoken phrase "
-        "to Sarvam to check for 'Hey Vaani' [dim](uses API credits; that audio leaves your device)[/].\n"
-        f"Push-to-talk (hold {(s.get('ptt_key') or 'f9').upper()}) only sends audio while you hold the key.")
-    s["wake_enabled"] = Confirm.ask("Enable the 'Hey Vaani' wake word?",
+        "[bold]Wake word 'Hey Vaani'[/]: detected [bold]locally[/] on your laptop with classic signal processing "
+        "(MFCC + DTW) against 3 samples of your voice. [dim]No internet, no API credits, no AI model; "
+        "only the command you say after it is sent to Sarvam.[/]\n"
+        f"Push-to-talk (hold {(s.get('ptt_key') or 'f9').upper()}) always works too.")
+    s["wake_enabled"] = Confirm.ask("Enable the 'Hey Vaani' wake word (record 3 samples now)?",
                                     default=bool(s.get("wake_enabled", True)))
+    if s["wake_enabled"]:
+        s["wake_enabled"] = _enroll_wake()
+
+
+def run_wake_setup() -> None:
+    """`vaani setup --wake`: (re-)enroll the wake word only."""
+    s = load_settings()
+    _step_wake(s)
+    save_settings(s)
+    apply_settings()
 
 
 def run_setup() -> dict:
     console.print(Panel.fit(
         "[bold]Welcome to Vaani[/] - a voice assistant for your laptop, powered by Sarvam AI.\n\n"
         "Runs locally: settings, your API key, voice detection, recording, playback and laptop control.\n"
-        "No local AI models. AI calls (speech-to-text incl. wake-word check, translation, text-to-speech,\n"
+        "No local AI models. 'Hey Vaani' is matched locally (no credits). AI calls (speech-to-text of\n"
+        "your command, translation, text-to-speech,\n"
         "the agent, screen reading) go to Sarvam's cloud.",
         title="Vaani setup", border_style="cyan"))
     if config.IS_WSL:
