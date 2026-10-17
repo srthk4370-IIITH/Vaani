@@ -1,0 +1,13 @@
+requests
+python-dotenv
+rich
+sounddevice
+soundfile
+numpy
+pynput
+pyautogui
+pyperclip
+pillow
+# Windows only (volume control):
+pycaw; sys_platform == "win32"
+comtypes; sys_platform == "win32"

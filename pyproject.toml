@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vaani"
+version = "0.1.0"
+description = "Siri-like terminal voice assistant for any laptop, powered by Sarvam AI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "python-dotenv",
+    "rich",
+    "sounddevice",
+    "soundfile",
+    "numpy",
+    "pynput",
+    "pyautogui",
+    "pyperclip",
+    "pillow",
+]
+
+[project.optional-dependencies]
+windows = ["pycaw", "comtypes"]
+
+[project.scripts]
+vaani = "vaani.main:cli"
+
+[tool.setuptools]
+packages = ["vaani"]
