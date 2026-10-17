@@ -1,10 +1,21 @@
 # Vaani
 
-**Siri for any laptop.** Vaani is a voice agent that runs in your terminal and is powered entirely by [Sarvam AI](https://sarvam.ai).
-Speak in any of 11 Indian languages or Hinglish. Vaani operates your laptop and replies **out loud in your language**.
-When something fails, it tells you why, also out loud and in your language.
+**Siri for any laptop, in every Indian language.** A voice agent that runs in your terminal, powered by [Sarvam AI](https://sarvam.ai).
 
-Windows, macOS, Linux and WSL. Contributor notes: [HANDBOOK.md](HANDBOOK.md).
+> I was wondering why there was no Siri for normal laptops. Macs have Siri and Windows had Cortana, but neither
+> really *operates* your computer, and neither understands how most of India actually speaks: Hinglish, Telugu,
+> Tamil, Kannada, Bengali, all mixed together. Vaani is my answer.
+
+Say **"Hey Vaani, Chrome kholo aur YouTube pe lo-fi music search karo"** (or hold **F9** and speak, or just type).
+Vaani opens the browser, runs the search, and answers **out loud in the language you spoke**. When something fails,
+it tells you why, also out loud and in your language.
+
+- **A real agent:** Sarvam 105B decides what to do and calls 26 tools, including laptop actions and other Sarvam models (vision, documents, translation, transliteration, language ID).
+- **Local-first:** only AI calls go to Sarvam's cloud. Onboarding, your key, settings, the "Hey Vaani" wake word, recording, playback and every action stay on your laptop. No AI model is downloaded.
+- **Safe:** local guardrail rules plus a 105B risk review, confirmations for risky actions, an audit log, and no shell access for the model.
+- **Remembers context:** follow-ups like "now type the same thing in Tamil" work within a session.
+
+Windows, macOS, Linux and WSL. Contributor notes and build log: [HANDBOOK.md](HANDBOOK.md).
 
 ## Quick start
 
@@ -32,13 +43,16 @@ pip install -e .        # on Windows: pip install -e ".[windows]"
 vaani
 ```
 
-**Onboarding** runs on first launch (or any time with `vaani setup`):
-1. Sarvam API key, entered hidden and saved locally to `~/.vaani/.env`
-2. Microphone test
-3. Wake-word enrollment: say "Hey Vaani" 3 times
-4. Push-to-talk key (default F9)
-5. SAFE_MODE confirmations on or off
-6. Reply language
+**Onboarding** runs automatically on first launch (or any time with `vaani setup`). Everything is saved locally, and progress is saved after every step:
+1. **Sarvam API key:** entered hidden, saved to `~/.vaani/.env`, then checked with a test call. If the key is ever missing, Vaani asks for it again in every mode.
+2. **Microphone:** Vaani tests every mic, shows its level, and recommends the one that actually hears you. This matters on laptops where the Windows default is a silent virtual mic, such as a phone-webcam driver. Then it runs a level test.
+3. **Push-to-talk key:** default F9.
+4. **Activation (you must choose):**
+   - **1 · "Hey Vaani" hands-free:** you record "Hey Vaani" 3 times right then (about 15 s), plus a check that it matches. Without this recording the wake word cannot work.
+   - **2 · F9 only:** no recording; hold the key and speak.
+
+   You can (re-)record later with `vaani setup --wake`. If the wake word is on but was never recorded, Vaani offers to record it at launch.
+5. **Preferences:** SAFE_MODE confirmations, and the default reply language.
 
 ## How to use
 
@@ -74,6 +88,7 @@ Give a command in any of three ways:
 | `vaani --simple` | Plain loop without the interactive UI |
 | `vaani doctor` | Checks the API key, Sarvam reachability, mic, audio output and wake word |
 | `vaani setup` | Re-runs onboarding |
+| `vaani setup --wake` | Re-records your "Hey Vaani" samples only |
 | `vaani --version` | Prints the version |
 
 `-t` and `-l` are short for `--text` and `--lang`. Without installing, use `python -m vaani ...`.
@@ -94,7 +109,11 @@ Give a command in any of three ways:
 
 1. **Hear:** `saaras:v4` in translate mode turns speech into English and detects the spoken language.
 2. **Think and act:** `sarvam-105b` plans and picks tools. Some run locally on your laptop; others call another Sarvam model.
-3. **Reply:** the answer is translated back and spoken with `bulbul:v4-flash`. Malayalam and Odia have no v4-flash voice, so those fall back to `bulbul:v3`.
+3. **Reply:** 105B writes the final answer directly in your language. A Mayura translation runs only if the reply comes back in the wrong script. The answer is spoken with `bulbul:v4-flash`; Malayalam and Odia have no v4-flash voice, so they fall back to `bulbul:v3`. Playback always runs to the end of the sentence.
+
+**Memory:** the last 4 exchanges (command, reply, tools used) are kept in-process for follow-ups. They are never written to disk.
+
+**Speed:** HTTP keep-alive, reasoning off for the agent loop, and no separate translate step. A simple command takes about 1–3 s for the agent plus about 1–2 s for speech.
 
 | Sarvam model | Used for |
 |---|---|
@@ -165,10 +184,14 @@ More:
 
 ## Wake word and privacy
 
-The wake word runs **entirely on your laptop**: a personalized "Hey Vaani" detector that compares your voice against the 3 samples you recorded during `vaani setup`, using MFCC features and DTW template matching in numpy.
+The wake word runs **entirely on your laptop**. It is a personalized "Hey Vaani" detector:
+1. A local energy-based voice detector captures each phrase. It decides when you've stopped talking relative to your own speaking volume, so background noise can't keep it recording.
+2. The phrase is compared against the 3 samples you recorded, using MFCC features and DTW template matching in numpy (about 0.05 s).
+3. Non-matching speech is dropped on the spot.
+
 It makes no API calls, uses no credits, and needs no downloaded AI model.
-Audio goes to Saaras only after a local wake-word match, or while you hold F9. Everything else stays on the device.
-To re-enroll, run `vaani setup`. To use push-to-talk only, set `VAANI_WAKE=0`.
+Audio goes to Saaras only after a local wake-word match (just the command after "Hey Vaani"), or while you hold F9.
+To re-record, run `vaani setup --wake`. To use push-to-talk only, choose option 2 in setup or set `VAANI_WAKE=0`.
 
 ## Guardrails and safety
 
@@ -210,10 +233,12 @@ Set these in `~/.vaani/.env` or in your environment.
 
 ## Troubleshooting
 
-- **No mic input or the wrong device:** run `vaani doctor` and set your default input device in OS settings.
+- **No mic input / Vaani hears nothing:** run `vaani setup` and pick the mic with a real level. The Windows default can be a silent virtual device (e.g. Iriun Webcam); Vaani then uses your choice for every recording. Also check permissions:
   - Windows: Settings > Privacy > Microphone > "Let desktop apps access your microphone".
   - macOS: System Settings > Privacy & Security > Microphone, then allow your terminal.
-- **Wake word misses or false-triggers:** re-run `vaani setup` to re-record your 3 samples in your usual environment, or hold F9.
+- **"Hey Vaani" does nothing:** you probably haven't recorded it yet. `vaani doctor` shows `enrolled no` in that case; run `vaani setup --wake`.
+- **Wake word misses or false-triggers:** re-record in your usual environment with `vaani setup --wake`. When recording, say just "Hey Vaani" and pause. Or hold F9.
+- **`WinError 6` / "The handle is invalid" at a prompt:** some audio drivers break the console's keyboard input. Vaani reconnects it and asks again; if that fails, re-run the command.
 - **macOS: keys or typing do nothing:** grant your terminal **Accessibility** access (and Input Monitoring if F9 does nothing).
 - **WSL: no audio:** WSL has no direct mic access without WSLg/PulseAudio. Use `--text`, or run Vaani natively on Windows.
 - **Linux Wayland: hotkeys or typing fail:** global key hooks and pyautogui need X11. Use an Xorg session, the wake word, or `--text`.
@@ -224,10 +249,14 @@ Set these in `~/.vaani/.env` or in your environment.
 ## Verified status
 
 Live-tested on Windows, October 2026:
-- PRD demos 1, 3, 4 and 5 pass end to end.
-- Tool selection verified for `detect_language`, `transliterate_text` and `read_document`.
-- Sarvam doc-ai reads a PDF correctly through `read_document`.
+- Every Sarvam call works: Saaras v4 STT, Mayura, Bulbul v4/v3, 105B tool calling, Gemma 4 vision and Doc-AI.
+- PRD demos 1, 3, 4 and 5 pass end to end (typed commands, spoken replies).
+- 105B picks the right tools on its own: `detect_language`, `transliterate_text`, `read_document`, `system_info`.
+- Session memory works for follow-ups. Replies arrive directly in Hindi and other languages, with no translate call.
+- Fresh clone + `install` creates the `vaani` command, and onboarding asks for the key.
+- Full-length TTS playback: a 10 s reply plays to the end.
+- Wake-word matching and end-of-speech detection pass synthetic-audio tests.
 
 Not yet verified:
-- PRD demo 2 by voice (Telugu/Tamil speech).
-- Runtime on macOS and Linux (installers written, not run on real hardware).
+- Wake word with real voices in noisy rooms, and PRD demo 2 by voice (Telugu/Tamil speech).
+- Runtime on macOS and Linux (code paths and installers written, not run on real hardware).
